@@ -1,0 +1,187 @@
+import cv2
+import numpy as np
+import math
+
+video = cv2.VideoCapture("road_car_view.mp4")
+GREEN = (0, 255, 0)
+THICKNESS = 5
+coordinates = []
+
+class HoughBundler:
+    def get_orientation(self, line):
+        orientation = math.atan2(abs((line[0] - line[2])), abs((line[1] - line[3])))
+        return math.degrees(orientation)
+
+    def checker(self, line_new, groups, min_distance_to_merge, min_angle_to_merge):
+        for group in groups:
+            for line_old in group:
+                if self.get_distance(line_old, line_new) < min_distance_to_merge:
+                    orientation_new = self.get_orientation(line_new)
+                    orientation_old = self.get_orientation(line_old)
+                    if abs(orientation_new - orientation_old) < min_angle_to_merge:
+                        group.append(line_new)
+                        return False
+        return True
+
+    def DistancePointLine(self, point, line):
+        px, py = point
+        x1, y1, x2, y2 = line
+
+        def lineMagnitude(x1, y1, x2, y2):
+            lineMagnitude = math.sqrt(math.pow((x2 - x1), 2) + math.pow((y2 - y1), 2))
+            return lineMagnitude
+
+        LineMag = lineMagnitude(x1, y1, x2, y2)
+        if LineMag < 0.00000001:
+            DistancePointLine = 9999
+            return DistancePointLine
+
+        u1 = (((px - x1) * (x2 - x1)) + ((py - y1) * (y2 - y1)))
+        u = u1 / (LineMag * LineMag)
+
+        if (u < 0.00001) or (u > 1):
+            ix = lineMagnitude(px, py, x1, y1)
+            iy = lineMagnitude(px, py, x2, y2)
+            if ix > iy:
+                DistancePointLine = iy
+            else:
+                DistancePointLine = ix
+        else:
+            ix = x1 + u * (x2 - x1)
+            iy = y1 + u * (y2 - y1)
+            DistancePointLine = lineMagnitude(px, py, ix, iy)
+
+        return DistancePointLine
+
+    def get_distance(self, a_line, b_line):
+        dist1 = self.DistancePointLine(a_line[:2], b_line)
+        dist2 = self.DistancePointLine(a_line[2:], b_line)
+        dist3 = self.DistancePointLine(b_line[:2], a_line)
+        dist4 = self.DistancePointLine(b_line[2:], a_line)
+
+        return min(dist1, dist2, dist3, dist4)
+
+    def merge_lines_pipeline_2(self, lines):
+        groups = []
+        min_distance_to_merge = 100
+        min_angle_to_merge = 100
+        groups.append([lines[0]])
+        for line_new in lines[1:]:
+            if self.checker(line_new, groups, min_distance_to_merge, min_angle_to_merge):
+                groups.append([line_new])
+
+        return groups
+
+    def merge_lines_segments1(self, lines):
+        orientation = self.get_orientation(lines[0])
+
+        if len(lines) == 1:
+            return [lines[0][:2], lines[0][2:]]
+
+        points = []
+        for line in lines:
+            points.append(line[:2])
+            points.append(line[2:])
+        if 0 < orientation < 0:
+            points = sorted(points, key=lambda point: point[1])
+        else:
+            points = sorted(points, key=lambda point: point[0])
+
+        return [points[0], points[-1]]
+
+    def process_lines(self, lines, img):
+        lines_x = []
+        lines_y = []
+        for line_i in [l[0] for l in lines]:
+            orientation = self.get_orientation(line_i)
+            if 0 < orientation < 0:
+                lines_y.append(line_i)
+            else:
+                lines_x.append(line_i)
+
+        lines_y = sorted(lines_y, key=lambda line: line[1])
+        lines_x = sorted(lines_x, key=lambda line: line[0])
+        merged_lines_all = []
+
+        for i in [lines_x, lines_y]:
+            if len(i) > 0:
+                groups = self.merge_lines_pipeline_2(i)
+                merged_lines = []
+                for group in groups:
+                    merged_lines.append(self.merge_lines_segments1(group))
+                merged_lines_all.extend(merged_lines)
+
+        return merged_lines_all
+
+def region_of_interest(image):
+    height = image.shape[0]
+    width = image.shape[1]
+    polygons = np.array([
+        [(0, height), (width, height), (700, 450), (500, 500)]
+    ])
+    mask = np.zeros_like(image)
+    cv2.fillPoly(mask, polygons, 255)
+    masked_image = cv2.bitwise_and(image, mask)
+    return masked_image
+
+
+def on_mouse_click(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        coordinates.append((x, y))
+        print(f"Clicked at (x, y): ({x}, {y})")
+        cv2.putText(frame,  f"Clicked at (x, y): ({x}, {y})", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 2)
+
+cv2.namedWindow("frame")
+cv2.setMouseCallback("frame", on_mouse_click)
+
+while video.isOpened():
+    ret, orig_frame = video.read()
+    if not ret:
+        video = cv2.VideoCapture("road_car_view.mp4")
+        continue
+    frame = cv2.GaussianBlur(orig_frame, (5, 5), 0)
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    low_yellow = np.array([18, 94, 105])
+    up_yellow = np.array([48, 255, 255])
+    mask = cv2.inRange(hsv, low_yellow, up_yellow)
+    edges = cv2.Canny(mask, 75, 150)
+    cropped_image = region_of_interest(edges)
+    lines = cv2.HoughLinesP(cropped_image, 1, np.pi / 180, 50, maxLineGap=50)
+
+    if lines is not None:
+        bundler = HoughBundler()
+        merged_lines = bundler.process_lines(lines, edges)
+
+        if len(merged_lines) == 1:
+            x1, y1 = map(int, merged_lines[0][0])
+            x2, y2 = map(int, merged_lines[0][1])
+            # d1, e1 = (618, 463)
+            # d2, e2 = (225, 677)
+
+            d1, e1 = (573, 489)
+            d2, e2 = (260, 716)
+            # (1271, 690)
+            # (886, 521)
+            if x1 > 500:  # Green line on the left
+                cv2.line(frame, (d1, e1), (d2, e2), GREEN, THICKNESS)
+            else:  # Green line on the right
+                d1, e1 = (804, 494)
+                d2, e2 = (1250, 688)
+                cv2.line(frame, (d1, e1), (d2, e2), GREEN, THICKNESS)
+
+        for line in merged_lines:
+            x1, y1 = map(int, line[0])
+            x2, y2 = map(int, line[1])
+            cv2.line(frame, (x1, y1), (x2, y2), GREEN, THICKNESS)
+
+    #cv2.imshow("cropped_image", cropped_image)
+    cv2.imshow("frame", frame)
+
+
+    key = cv2.waitKey(1)
+    if key == 27:
+        break
+
+video.release()
+cv2.destroyAllWindows()
